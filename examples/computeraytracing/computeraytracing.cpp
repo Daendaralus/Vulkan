@@ -22,12 +22,12 @@
 #include "VulkanTexture.hpp"
 
 #define VERTEX_BUFFER_BIND_ID 0
-#define ENABLE_VALIDATION false
+#define ENABLE_VALIDATION true
 
 #if defined(__ANDROID__)
 #define TEX_DIM 1024
 #else
-#define TEX_DIM 2048
+#define TEX_DIM 128*2
 #endif
 
 class VulkanExample : public VulkanExampleBase
@@ -49,6 +49,7 @@ public:
 		struct {
 			vks::Buffer spheres;						// (Shader) storage buffer object with scene spheres
 			vks::Buffer planes;						// (Shader) storage buffer object with scene planes
+			vks::Buffer image;
 		} storageBuffers;
 		vks::Buffer uniformBuffer;					// Uniform buffer object containing scene data
 		VkQueue queue;								// Separate queue for compute commands (queue family may differ from the one used for graphics)
@@ -91,6 +92,10 @@ public:
 		glm::ivec3 _pad;
 	};
 
+		// This array holds the light positions
+	// and will be updated via a push constant
+	std::array<int32_t, 6> pushConstants;
+
 	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		title = "Compute shader ray tracing";
@@ -104,6 +109,11 @@ public:
 		camera.setTranslation(glm::vec3(0.0f, 0.0f, -4.0f));
 		camera.rotationSpeed = 0.0f;
 		camera.movementSpeed = 2.5f;
+	}
+	
+	void VulkanExample::getEnabledFeatures()
+	{
+		enabledFeatures.shaderFloat64 = 1;
 	}
 
 	~VulkanExample()
@@ -133,7 +143,7 @@ public:
 		VkFormatProperties formatProperties;
 		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &formatProperties);
 		// Check if requested image format supports image storage operations
-		assert(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+		//assert(formatProperties.linearTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
 
 		// Prepare blit target texture
 		tex->width = width;
@@ -146,10 +156,10 @@ public:
 		imageCreateInfo.mipLevels = 1;
 		imageCreateInfo.arrayLayers = 1;
 		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
 		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		// Image will be sampled in the fragment shader and used as storage target in the compute shader
-		imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+		imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 		imageCreateInfo.flags = 0;
 
 		VkMemoryAllocateInfo memAllocInfo = vks::initializers::memoryAllocateInfo();
@@ -231,23 +241,55 @@ public:
 			VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[i], &cmdBufInfo));
 
 			// Image memory barrier to make sure that compute shader writes are finished before sampling from the texture
-			VkImageMemoryBarrier imageMemoryBarrier = {};
-			imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-			imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-			imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-			imageMemoryBarrier.image = textureComputeTarget.image;
-			imageMemoryBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-			imageMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			imageMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			
+			VkBufferMemoryBarrier bufferMemoryBarrier = {};
+			bufferMemoryBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+			bufferMemoryBarrier.buffer = compute.storageBuffers.image.buffer;
+			bufferMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			bufferMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			bufferMemoryBarrier.size = VK_WHOLE_SIZE;
 			vkCmdPipelineBarrier(
 				drawCmdBuffers[i],
 				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 				VK_FLAGS_NONE,
 				0, nullptr,
-				0, nullptr,
-				1, &imageMemoryBarrier);
+			    1, &bufferMemoryBarrier,
+			    0, nullptr);
 
+			// TODO: copy image from storage buffer to texture
+			textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			vks::tools::setImageLayout(
+			    drawCmdBuffers[i],
+			    textureComputeTarget.image,
+			    VK_IMAGE_ASPECT_COLOR_BIT,
+			    VK_IMAGE_LAYOUT_GENERAL,
+			    textureComputeTarget.imageLayout);
+			// Copy to staging buffer
+			//VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+			VkBufferImageCopy copyRegion = {};
+			copyRegion.bufferOffset          = 0;
+			copyRegion.bufferRowLength       = 0;
+			copyRegion.bufferImageHeight     = 0;
+
+			copyRegion.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			copyRegion.imageSubresource.mipLevel       = 0;
+			copyRegion.imageSubresource.baseArrayLayer = 0;
+			copyRegion.imageSubresource.layerCount     = 1;
+
+			copyRegion.imageOffset = {0, 0, 0};
+			copyRegion.imageExtent = {
+			    TEX_DIM,
+			    TEX_DIM,
+			    1};
+			vkCmdCopyBufferToImage(drawCmdBuffers[i], compute.storageBuffers.image.buffer, textureComputeTarget.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+			textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			vks::tools::setImageLayout(
+			    drawCmdBuffers[i],
+			    textureComputeTarget.image,
+			    VK_IMAGE_ASPECT_COLOR_BIT,
+			    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			    textureComputeTarget.imageLayout);
 			vkCmdBeginRenderPass(drawCmdBuffers[i], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vks::initializers::viewport((float)width, (float)height, 0.0f, 1.0f);
@@ -277,10 +319,34 @@ public:
 
 		VK_CHECK_RESULT(vkBeginCommandBuffer(compute.commandBuffer, &cmdBufInfo));
 
+		std::array<int32_t, 3> pushint = {100, textureComputeTarget.width, textureComputeTarget.height};
+		std::array<float_t, 3> pushfloat = {100.0, 0.0, 1000.0};
+		// Submit via push constant (rather than a UBO)
+		vkCmdPushConstants(
+		    compute.commandBuffer,
+		    compute.pipelineLayout,
+		    VK_SHADER_STAGE_COMPUTE_BIT,
+		    0,
+		    sizeof(int32_t),
+		    pushint.data());
+		vkCmdPushConstants(
+		    compute.commandBuffer,
+		    compute.pipelineLayout,
+		    VK_SHADER_STAGE_COMPUTE_BIT,
+		    4,
+		    sizeof(pushfloat),
+		    pushfloat.data());
+		vkCmdPushConstants(
+		    compute.commandBuffer,
+		    compute.pipelineLayout,
+		    VK_SHADER_STAGE_COMPUTE_BIT,
+		    16,
+		    2*sizeof(int32_t),
+		    pushint.data()+1);
 		vkCmdBindPipeline(compute.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipeline);
 		vkCmdBindDescriptorSets(compute.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipelineLayout, 0, 1, &compute.descriptorSet, 0, 0);
-
-		vkCmdDispatch(compute.commandBuffer, textureComputeTarget.width / 16, textureComputeTarget.height / 16, 1);
+		vkCmdFillBuffer(compute.commandBuffer, compute.storageBuffers.image.buffer, 0, compute.storageBuffers.image.size, 0);
+		vkCmdDispatch(compute.commandBuffer, textureComputeTarget.width/2, textureComputeTarget.height/2, 1);
 
 		vkEndCommandBuffer(compute.commandBuffer);
 	}
@@ -312,82 +378,90 @@ public:
 	// Setup and fill the compute shader storage buffers containing primitives for the raytraced scene
 	void prepareStorageBuffers()
 	{
-		// Spheres
-		std::vector<Sphere> spheres;
-		spheres.push_back(newSphere(glm::vec3(1.75f, -0.5f, 0.0f), 1.0f, glm::vec3(0.0f, 1.0f, 0.0f), 32.0f));
-		spheres.push_back(newSphere(glm::vec3(0.0f, 1.0f, -0.5f), 1.0f, glm::vec3(0.65f, 0.77f, 0.97f), 32.0f));
-		spheres.push_back(newSphere(glm::vec3(-1.75f, -0.75f, -0.5f), 1.25f, glm::vec3(0.9f, 0.76f, 0.46f), 32.0f));
-		VkDeviceSize storageBufferSize = spheres.size() * sizeof(Sphere);
-
-		// Stage
-		vks::Buffer stagingBuffer;
-
+		VkDeviceSize storageBufferSize = TEX_DIM*TEX_DIM*3 * sizeof(float);
 		vulkanDevice->createBuffer(
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			&stagingBuffer,
-			storageBufferSize,
-			spheres.data());
+		    // The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
+		    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		    &compute.storageBuffers.image,
+		    storageBufferSize);
+		//// Spheres
+		//std::vector<Sphere> spheres;
+		//spheres.push_back(newSphere(glm::vec3(1.75f, -0.5f, 0.0f), 1.0f, glm::vec3(0.0f, 1.0f, 0.0f), 32.0f));
+		//spheres.push_back(newSphere(glm::vec3(0.0f, 1.0f, -0.5f), 1.0f, glm::vec3(0.65f, 0.77f, 0.97f), 32.0f));
+		//spheres.push_back(newSphere(glm::vec3(-1.75f, -0.75f, -0.5f), 1.25f, glm::vec3(0.9f, 0.76f, 0.46f), 32.0f));
+		//VkDeviceSize storageBufferSize = spheres.size() * sizeof(Sphere);
 
-		vulkanDevice->createBuffer(
-			// The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			&compute.storageBuffers.spheres,
-			storageBufferSize);
+		//// Stage
+		//vks::Buffer stagingBuffer;
 
-		// Copy to staging buffer
-		VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
-		VkBufferCopy copyRegion = {};
-		copyRegion.size = storageBufferSize;
-		vkCmdCopyBuffer(copyCmd, stagingBuffer.buffer, compute.storageBuffers.spheres.buffer, 1, &copyRegion);
-		vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
+		//vulkanDevice->createBuffer(
+		//	VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		//	VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		//	&stagingBuffer,
+		//	storageBufferSize,
+		//	spheres.data());
 
-		stagingBuffer.destroy();
+		//vulkanDevice->createBuffer(
+		//	// The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
+		//	VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		//	VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		//	&compute.storageBuffers.spheres,
+		//	storageBufferSize);
 
-		// Planes
-		std::vector<Plane> planes;
-		const float roomDim = 4.0f;
-		planes.push_back(newPlane(glm::vec3(0.0f, 1.0f, 0.0f), roomDim, glm::vec3(1.0f), 32.0f));
-		planes.push_back(newPlane(glm::vec3(0.0f, -1.0f, 0.0f), roomDim, glm::vec3(1.0f), 32.0f));
-		planes.push_back(newPlane(glm::vec3(0.0f, 0.0f, 1.0f), roomDim, glm::vec3(1.0f), 32.0f));
-		planes.push_back(newPlane(glm::vec3(0.0f, 0.0f, -1.0f), roomDim, glm::vec3(0.0f), 32.0f));
-		planes.push_back(newPlane(glm::vec3(-1.0f, 0.0f, 0.0f), roomDim, glm::vec3(1.0f, 0.0f, 0.0f), 32.0f));
-		planes.push_back(newPlane(glm::vec3(1.0f, 0.0f, 0.0f), roomDim, glm::vec3(0.0f, 1.0f, 0.0f), 32.0f));
-		storageBufferSize = planes.size() * sizeof(Plane);
+		//// Copy to staging buffer
+		//VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+		//VkBufferCopy copyRegion = {};
+		//copyRegion.size = storageBufferSize;
+		//vkCmdCopyBuffer(copyCmd, stagingBuffer.buffer, compute.storageBuffers.spheres.buffer, 1, &copyRegion);
+		//vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
 
-		// Stage
-		vulkanDevice->createBuffer(
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			&stagingBuffer,
-			storageBufferSize,
-			planes.data());
+		//stagingBuffer.destroy();
 
-		vulkanDevice->createBuffer(
-			// The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			&compute.storageBuffers.planes,
-			storageBufferSize);
+		//// Planes
+		//std::vector<Plane> planes;
+		//const float roomDim = 4.0f;
+		//planes.push_back(newPlane(glm::vec3(0.0f, 1.0f, 0.0f), roomDim, glm::vec3(1.0f), 32.0f));
+		//planes.push_back(newPlane(glm::vec3(0.0f, -1.0f, 0.0f), roomDim, glm::vec3(1.0f), 32.0f));
+		//planes.push_back(newPlane(glm::vec3(0.0f, 0.0f, 1.0f), roomDim, glm::vec3(1.0f), 32.0f));
+		//planes.push_back(newPlane(glm::vec3(0.0f, 0.0f, -1.0f), roomDim, glm::vec3(0.0f), 32.0f));
+		//planes.push_back(newPlane(glm::vec3(-1.0f, 0.0f, 0.0f), roomDim, glm::vec3(1.0f, 0.0f, 0.0f), 32.0f));
+		//planes.push_back(newPlane(glm::vec3(1.0f, 0.0f, 0.0f), roomDim, glm::vec3(0.0f, 1.0f, 0.0f), 32.0f));
+		//storageBufferSize = planes.size() * sizeof(Plane);
 
-		// Copy to staging buffer
-		copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
-		copyRegion.size = storageBufferSize;
-		vkCmdCopyBuffer(copyCmd, stagingBuffer.buffer, compute.storageBuffers.planes.buffer, 1, &copyRegion);
-		vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
+		//// Stage
+		//vulkanDevice->createBuffer(
+		//	VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		//	VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		//	&stagingBuffer,
+		//	storageBufferSize,
+		//	planes.data());
 
-		stagingBuffer.destroy();
+		//vulkanDevice->createBuffer(
+		//	// The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
+		//	VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		//	VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		//	&compute.storageBuffers.planes,
+		//	storageBufferSize);
+
+		//// Copy to staging buffer
+		//copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+		//copyRegion.size = storageBufferSize;
+		//vkCmdCopyBuffer(copyCmd, stagingBuffer.buffer, compute.storageBuffers.planes.buffer, 1, &copyRegion);
+		//vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
+
+		//stagingBuffer.destroy();
 	}
 
 	void setupDescriptorPool()
 	{
 		std::vector<VkDescriptorPoolSize> poolSizes =
 		{
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2),			// Compute UBO
+			//vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),			// Compute UBO
 			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4),	// Graphics image samplers
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),				// Storage image for ray traced image output
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2),			// Storage buffer for the scene primitives
+		    vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1),				// Storage image for ray traced image output
+			//vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2),			// Storage buffer for the scene primitives
 		};
 
 		VkDescriptorPoolCreateInfo descriptorPoolInfo =
@@ -548,24 +622,24 @@ public:
 		std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings = {
 			// Binding 0: Storage image (raytraced output)
 			vks::initializers::descriptorSetLayoutBinding(
-				VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+		        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 				VK_SHADER_STAGE_COMPUTE_BIT,
 				0),
-			// Binding 1: Uniform buffer block
-			vks::initializers::descriptorSetLayoutBinding(
-				VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				VK_SHADER_STAGE_COMPUTE_BIT,
-				1),
-			// Binding 1: Shader storage buffer for the spheres
-			vks::initializers::descriptorSetLayoutBinding(
-				VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				VK_SHADER_STAGE_COMPUTE_BIT,
-				2),
-			// Binding 1: Shader storage buffer for the planes
-			vks::initializers::descriptorSetLayoutBinding(
-				VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				VK_SHADER_STAGE_COMPUTE_BIT,
-				3)
+			//// Binding 1: Uniform buffer block
+			//vks::initializers::descriptorSetLayoutBinding(
+			//	VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			//	VK_SHADER_STAGE_COMPUTE_BIT,
+			//	1),
+			//// Binding 1: Shader storage buffer for the spheres
+			//vks::initializers::descriptorSetLayoutBinding(
+			//	VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			//	VK_SHADER_STAGE_COMPUTE_BIT,
+			//	2),
+			//// Binding 1: Shader storage buffer for the planes
+			//vks::initializers::descriptorSetLayoutBinding(
+			//	VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			//	VK_SHADER_STAGE_COMPUTE_BIT,
+			//	3)
 		};
 
 		VkDescriptorSetLayoutCreateInfo descriptorLayout =
@@ -579,6 +653,22 @@ public:
 			vks::initializers::pipelineLayoutCreateInfo(
 				&compute.descriptorSetLayout,
 				1);
+
+				// Define push constant
+		// Example uses six light positions as push constants
+		// 6 * 4 * 4 = 96 bytes
+		// Spec requires a minimum of 128 bytes, bigger values
+		// need to be checked against maxPushConstantsSize
+		// But even at only 128 bytes, lots of stuff can fit
+		// inside push constants
+		VkPushConstantRange pushConstantRange =
+		    vks::initializers::pushConstantRange(
+		        VK_SHADER_STAGE_COMPUTE_BIT,
+		        sizeof(pushConstants),
+		        0);
+		// Push constant ranges are part of the pipeline layout
+		pPipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+		pPipelineLayoutCreateInfo.pPushConstantRanges    = &pushConstantRange;
 
 		VK_CHECK_RESULT(vkCreatePipelineLayout(device, &pPipelineLayoutCreateInfo, nullptr, &compute.pipelineLayout));
 
@@ -595,27 +685,27 @@ public:
 			// Binding 0: Output storage image
 			vks::initializers::writeDescriptorSet(
 				compute.descriptorSet,
-				VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+		        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 				0,
-				&textureComputeTarget.descriptor),
-			// Binding 1: Uniform buffer block
-			vks::initializers::writeDescriptorSet(
-				compute.descriptorSet,
-				VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				1,
-				&compute.uniformBuffer.descriptor),
-			// Binding 2: Shader storage buffer for the spheres
-			vks::initializers::writeDescriptorSet(
-				compute.descriptorSet,
-				VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				2,
-				&compute.storageBuffers.spheres.descriptor),
-			// Binding 2: Shader storage buffer for the planes
-			vks::initializers::writeDescriptorSet(
-				compute.descriptorSet,
-				VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				3,
-				&compute.storageBuffers.planes.descriptor)
+				&compute.storageBuffers.image.descriptor),
+			//// Binding 1: Uniform buffer block
+			//vks::initializers::writeDescriptorSet(
+			//	compute.descriptorSet,
+			//	VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			//	1,
+			//	&compute.uniformBuffer.descriptor),
+			//// Binding 2: Shader storage buffer for the spheres
+			//vks::initializers::writeDescriptorSet(
+			//	compute.descriptorSet,
+			//	VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			//	2,
+			//	&compute.storageBuffers.spheres.descriptor),
+			//// Binding 2: Shader storage buffer for the planes
+			//vks::initializers::writeDescriptorSet(
+			//	compute.descriptorSet,
+			//	VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+			//	3,
+			//	&compute.storageBuffers.planes.descriptor)
 		};
 
 		vkUpdateDescriptorSets(device, computeWriteDescriptorSets.size(), computeWriteDescriptorSets.data(), 0, NULL);
@@ -626,7 +716,11 @@ public:
 				compute.pipelineLayout,
 				0);
 
-		computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/raytracing.comp.spv", VK_SHADER_STAGE_COMPUTE_BIT);
+
+
+		//computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/raytracing.comp.spv", VK_SHADER_STAGE_COMPUTE_BIT);
+		computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/lensflare.spv", VK_SHADER_STAGE_COMPUTE_BIT, "main");
+
 		VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1, &computePipelineCreateInfo, nullptr, &compute.pipeline));
 
 		// Separate command pool as queue family for compute may be different than graphics
@@ -677,6 +771,7 @@ public:
 		compute.uniformBuffer.unmap();
 	}
 
+
 	void draw()
 	{
 		VulkanExampleBase::prepareFrame();
@@ -704,8 +799,8 @@ public:
 	{
 		VulkanExampleBase::prepare();
 		prepareStorageBuffers();
-		prepareUniformBuffers();
-		prepareTextureTarget(&textureComputeTarget, TEX_DIM, TEX_DIM, VK_FORMAT_R8G8B8A8_UNORM);
+		//prepareUniformBuffers();
+		prepareTextureTarget(&textureComputeTarget, TEX_DIM, TEX_DIM, VK_FORMAT_R32G32B32_SFLOAT);
 		setupDescriptorSetLayout();
 		preparePipelines();
 		setupDescriptorPool();
@@ -719,17 +814,20 @@ public:
 	{
 		if (!prepared)
 			return;
-		draw();
+		
 		if (!paused)
 		{
-			updateUniformBuffers();
+			draw();
+			//updateUniformBuffers();
+			Sleep(5);
+			//paused = true;
 		}
 	}
 
 	virtual void viewChanged()
 	{
 		compute.ubo.aspectRatio = (float)width / (float)height;
-		updateUniformBuffers();
+		//updateUniformBuffers();
 	}
 };
 
