@@ -156,10 +156,10 @@ public:
 		imageCreateInfo.mipLevels = 1;
 		imageCreateInfo.arrayLayers = 1;
 		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-		imageCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
+		imageCreateInfo.tiling            = VK_IMAGE_TILING_OPTIMAL;
 		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		// Image will be sampled in the fragment shader and used as storage target in the compute shader
-		imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
 		imageCreateInfo.flags = 0;
 
 		VkMemoryAllocateInfo memAllocInfo = vks::initializers::memoryAllocateInfo();
@@ -239,57 +239,72 @@ public:
 			renderPassBeginInfo.framebuffer = frameBuffers[i];
 
 			VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[i], &cmdBufInfo));
-
+			VkImageMemoryBarrier imageMemoryBarrier = {};
+			imageMemoryBarrier.sType                = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			imageMemoryBarrier.oldLayout            = VK_IMAGE_LAYOUT_GENERAL;
+			imageMemoryBarrier.newLayout            = VK_IMAGE_LAYOUT_GENERAL;
+			imageMemoryBarrier.image                = textureComputeTarget.image;
+			imageMemoryBarrier.subresourceRange     = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			imageMemoryBarrier.srcAccessMask        = VK_ACCESS_SHADER_WRITE_BIT;
+			imageMemoryBarrier.dstAccessMask        = VK_ACCESS_SHADER_READ_BIT;
+			vkCmdPipelineBarrier(
+			    drawCmdBuffers[i],
+			    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			    VK_FLAGS_NONE,
+			    0, nullptr,
+			    0, nullptr,
+			    1, &imageMemoryBarrier);
 			// Image memory barrier to make sure that compute shader writes are finished before sampling from the texture
 			
-			VkBufferMemoryBarrier bufferMemoryBarrier = {};
-			bufferMemoryBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-			bufferMemoryBarrier.buffer = compute.storageBuffers.image.buffer;
-			bufferMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			bufferMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			bufferMemoryBarrier.size = VK_WHOLE_SIZE;
-			vkCmdPipelineBarrier(
-				drawCmdBuffers[i],
-				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				VK_FLAGS_NONE,
-				0, nullptr,
-			    1, &bufferMemoryBarrier,
-			    0, nullptr);
+			//VkBufferMemoryBarrier bufferMemoryBarrier = {};
+			//bufferMemoryBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+			//bufferMemoryBarrier.buffer = compute.storageBuffers.image.buffer;
+			//bufferMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			//bufferMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			//bufferMemoryBarrier.size = VK_WHOLE_SIZE;
+			//vkCmdPipelineBarrier(
+			//	drawCmdBuffers[i],
+			//	VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			//	VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			//	VK_FLAGS_NONE,
+			//	0, nullptr,
+			//    1, &bufferMemoryBarrier,
+			//    0, nullptr);
 
-			// TODO: copy image from storage buffer to texture
-			textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-			vks::tools::setImageLayout(
-			    drawCmdBuffers[i],
-			    textureComputeTarget.image,
-			    VK_IMAGE_ASPECT_COLOR_BIT,
-			    VK_IMAGE_LAYOUT_GENERAL,
-			    textureComputeTarget.imageLayout);
-			// Copy to staging buffer
-			//VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
-			VkBufferImageCopy copyRegion = {};
-			copyRegion.bufferOffset          = 0;
-			copyRegion.bufferRowLength       = 0;
-			copyRegion.bufferImageHeight     = 0;
+			//// TODO: copy image from storage buffer to texture
+			//textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			//vks::tools::setImageLayout(
+			//    drawCmdBuffers[i],
+			//    textureComputeTarget.image,
+			//    VK_IMAGE_ASPECT_COLOR_BIT,
+			//    VK_IMAGE_LAYOUT_GENERAL,
+			//    textureComputeTarget.imageLayout);
+			//// Copy to staging buffer
+			////VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+			//VkBufferImageCopy copyRegion = {};
+			//copyRegion.bufferOffset          = 0;
+			//copyRegion.bufferRowLength       = 0;
+			//copyRegion.bufferImageHeight     = 0;
 
-			copyRegion.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-			copyRegion.imageSubresource.mipLevel       = 0;
-			copyRegion.imageSubresource.baseArrayLayer = 0;
-			copyRegion.imageSubresource.layerCount     = 1;
+			//copyRegion.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			//copyRegion.imageSubresource.mipLevel       = 0;
+			//copyRegion.imageSubresource.baseArrayLayer = 0;
+			//copyRegion.imageSubresource.layerCount     = 1;
 
-			copyRegion.imageOffset = {0, 0, 0};
-			copyRegion.imageExtent = {
-			    TEX_DIM,
-			    TEX_DIM,
-			    1};
-			vkCmdCopyBufferToImage(drawCmdBuffers[i], compute.storageBuffers.image.buffer, textureComputeTarget.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-			textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-			vks::tools::setImageLayout(
-			    drawCmdBuffers[i],
-			    textureComputeTarget.image,
-			    VK_IMAGE_ASPECT_COLOR_BIT,
-			    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			    textureComputeTarget.imageLayout);
+			//copyRegion.imageOffset = {0, 0, 0};
+			//copyRegion.imageExtent = {
+			//    TEX_DIM,
+			//    TEX_DIM,
+			//    1};
+			//vkCmdCopyBufferToImage(drawCmdBuffers[i], compute.storageBuffers.image.buffer, textureComputeTarget.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+			//textureComputeTarget.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			//vks::tools::setImageLayout(
+			//    drawCmdBuffers[i],
+			//    textureComputeTarget.image,
+			//    VK_IMAGE_ASPECT_COLOR_BIT,
+			//    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			//    textureComputeTarget.imageLayout);
 			vkCmdBeginRenderPass(drawCmdBuffers[i], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vks::initializers::viewport((float)width, (float)height, 0.0f, 1.0f);
@@ -345,7 +360,7 @@ public:
 		    pushint.data()+1);
 		vkCmdBindPipeline(compute.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipeline);
 		vkCmdBindDescriptorSets(compute.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, compute.pipelineLayout, 0, 1, &compute.descriptorSet, 0, 0);
-		vkCmdFillBuffer(compute.commandBuffer, compute.storageBuffers.image.buffer, 0, compute.storageBuffers.image.size, 0);
+		//vkCmdFillBuffer(compute.commandBuffer, compute.storageBuffers.image.buffer, 0, compute.storageBuffers.image.size, 0);
 		vkCmdDispatch(compute.commandBuffer, textureComputeTarget.width/2, textureComputeTarget.height/2, 1);
 
 		vkEndCommandBuffer(compute.commandBuffer);
@@ -378,13 +393,13 @@ public:
 	// Setup and fill the compute shader storage buffers containing primitives for the raytraced scene
 	void prepareStorageBuffers()
 	{
-		VkDeviceSize storageBufferSize = TEX_DIM*TEX_DIM*3 * sizeof(float);
-		vulkanDevice->createBuffer(
-		    // The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
-		    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		    &compute.storageBuffers.image,
-		    storageBufferSize);
+		//VkDeviceSize storageBufferSize = TEX_DIM*TEX_DIM*3 * sizeof(float);
+		//vulkanDevice->createBuffer(
+		//    // The SSBO will be used as a storage buffer for the compute pipeline and as a vertex buffer in the graphics pipeline
+		//    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		//    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		//    &compute.storageBuffers.image,
+		//    storageBufferSize);
 		//// Spheres
 		//std::vector<Sphere> spheres;
 		//spheres.push_back(newSphere(glm::vec3(1.75f, -0.5f, 0.0f), 1.0f, glm::vec3(0.0f, 1.0f, 0.0f), 32.0f));
@@ -622,7 +637,7 @@ public:
 		std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings = {
 			// Binding 0: Storage image (raytraced output)
 			vks::initializers::descriptorSetLayoutBinding(
-		        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 				VK_SHADER_STAGE_COMPUTE_BIT,
 				0),
 			//// Binding 1: Uniform buffer block
@@ -685,9 +700,9 @@ public:
 			// Binding 0: Output storage image
 			vks::initializers::writeDescriptorSet(
 				compute.descriptorSet,
-		        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 				0,
-				&compute.storageBuffers.image.descriptor),
+		            &textureComputeTarget.descriptor),
 			//// Binding 1: Uniform buffer block
 			//vks::initializers::writeDescriptorSet(
 			//	compute.descriptorSet,
@@ -719,7 +734,7 @@ public:
 
 
 		//computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/raytracing.comp.spv", VK_SHADER_STAGE_COMPUTE_BIT);
-		computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/lensflare.spv", VK_SHADER_STAGE_COMPUTE_BIT, "main");
+		computePipelineCreateInfo.stage = loadShader(getShadersPath() + "computeraytracing/lensflare2.spv", VK_SHADER_STAGE_COMPUTE_BIT, "main");
 
 		VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1, &computePipelineCreateInfo, nullptr, &compute.pipeline));
 
@@ -800,7 +815,7 @@ public:
 		VulkanExampleBase::prepare();
 		prepareStorageBuffers();
 		//prepareUniformBuffers();
-		prepareTextureTarget(&textureComputeTarget, TEX_DIM, TEX_DIM, VK_FORMAT_R32G32B32_SFLOAT);
+		prepareTextureTarget(&textureComputeTarget, TEX_DIM, TEX_DIM, VK_FORMAT_R8G8B8A8_SNORM);
 		setupDescriptorSetLayout();
 		preparePipelines();
 		setupDescriptorPool();
